@@ -1,0 +1,132 @@
+#!/usr/bin/python
+
+import getopt, struct, sys, os
+
+import ao, mad
+
+MAX_SAMPLES_TO_STRIP = 1152
+SILENCE_LEVEL = 512
+
+def is_silence(sample, debug=0):
+    l, r = struct.unpack("=hh", sample)
+    ret = (l > -SILENCE_LEVEL and l < SILENCE_LEVEL) and \
+            (r > -SILENCE_LEVEL and r < SILENCE_LEVEL)
+    if debug:
+        sys.stderr.write(" " + repr((l, r, ret)))
+    return ret
+
+max_strip_size = MAX_SAMPLES_TO_STRIP * 4
+
+wav = ao.AudioDevice("wav", filename="audio-0.wav")
+print "CD_DA"
+print
+
+strip_beginning = 0
+strip_end = 1
+total_samples = 0L
+track_start = 0L
+
+opts, args = getopt.getopt(sys.argv[1:], 'dv')
+debug = False
+verbose = False
+for opt, arg in opts:
+    if opt == "-d":
+        debug = True
+    if opt == "-v":
+        verbose = True
+
+if verbose:
+    sys.stderr.write("Processing:")
+
+for arg in args:
+    mp3 = mad.MadFile(arg)
+
+    at_beginning = 1
+    begin_stripped = 0
+    end_buffer = ""
+    track_samples = 0L
+
+    if arg == args[-1]:
+        strip_end = 0
+
+    if verbose:
+        sys.stderr.write(" %s" % arg)
+        
+    print "// %s" % arg
+    print "// strip_beginning=%d, strip_end=%d" % (strip_beginning, \
+                               strip_end)
+
+    while 1:
+        dec = mp3.read()
+        if dec is None:
+            break
+        dec = str(dec)
+
+        if strip_beginning and at_beginning:
+            pos = 0
+            while pos < len(dec) and \
+                  begin_stripped < MAX_SAMPLES_TO_STRIP:
+                if is_silence(dec[pos:pos+4], debug):
+                    pos += 4
+                    begin_stripped += 1
+                else:
+                    break
+            dec = dec[pos:]
+
+        if len(dec) > 0:
+            at_beginning = 0
+            if is_silence(dec[-4:], debug):
+                end_buffer += dec
+                if len(end_buffer) + len(dec) > max_strip_size:
+                    wav.play(end_buffer[:-max_strip_size])
+                    track_samples += (len(end_buffer) - max_strip_size) / 4
+                    end_buffer = end_buffer[-max_strip_size:]
+            else:
+                wav.play(end_buffer)
+                wav.play(dec)
+                track_samples += (len(end_buffer) + len(dec)) / 4
+                end_buffer = ""
+
+    pos = 0
+    if strip_end:
+        chunk = end_buffer[-4:]
+        while pos < len(end_buffer):
+            if is_silence(chunk, debug):
+                pos += 4
+                chunk = end_buffer[-pos-4:-pos]
+            else:
+                break
+
+    wav.play(end_buffer[:-pos])
+    track_samples += (len(end_buffer) - pos) / 4
+    print "// stripped %d samples from beginning, %d from end" % \
+          (begin_stripped, pos / 4)
+
+    total_samples += track_samples
+    if arg == args[-1]:
+        track_end = total_samples - 1152
+    else:
+        track_end = total_samples / 588 * 588
+    track_length = track_end - track_start
+
+    print "TRACK AUDIO"
+    print "FILE \"audio.wav\" %d %d" % (track_start, track_length)
+    print
+
+    track_start = track_end
+
+    strip_beginning = 1
+
+if verbose:
+    sys.stderr.write(".\nConverting to PCM:")
+
+del(wav) # close 
+os.system("sox audio-0.wav -t wavpcm audio.wav")
+os.unlink("audio-0.wav")
+
+if verbose:
+    sys.stderr.write(".\n")
+
+
+
+
